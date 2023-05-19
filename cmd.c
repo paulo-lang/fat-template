@@ -206,7 +206,6 @@ int cpout( char *os_path, char *name )
 		printf("nao deu para abrir %s: %s\n",name,strerror(errno));
 		return 0;
 	}
-
 	while(1) {
 		result = fat_read(os_path,buffer,sizeof(buffer),offset);
 		if(result<=0) break;

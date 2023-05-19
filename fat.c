@@ -49,7 +49,7 @@ int mountState = 0;
 
 int fat_format(){ 
 	//Verificando primeiro se disco está montado
-	if(mountState == 1)
+	if(mountState == 0)
 	{
 		return -1;
 	}
@@ -379,6 +379,7 @@ int fat_read( char *name, char *buff, int length, int offset){
 	{
 		return -1;
 	}
+
 	int index = -1;
 	for(int i = 0; i < N_ITEMS; i++)
 	{
@@ -407,33 +408,50 @@ int fat_read( char *name, char *buff, int length, int offset){
 	search_file_blocks_on_fat(dir[index].first, file_positions, fat);
 
 	int counter = 0;
+	int left_on_buff = length;
 
 	ds_read(file_positions[counter], buffer);
 	
-	int remaining = length - bytesRead;
-	if(remaining >= BLOCK_SIZE) {
-		memcpy(buff, buffer + offset, BLOCK_SIZE - offset);
-		bytesRead += BLOCK_SIZE - offset;
-	} else {
-        memcpy(buff, buffer + offset, remaining - offset);
-        bytesRead += remaining;
-    }
-	counter++;
+	int remaining = dir[index].length;
 
-	while(bytesRead < length && bytesRead < dir[index].length && file_positions[counter] != -1)
+	int blocks_ahead = offset/BLOCK_SIZE;
+	counter += blocks_ahead;
+
+	int offset_in_bytes = offset%BLOCK_SIZE;
+	
+	int to_be_read = 0;
+
+	while(remaining > 0 && file_positions[counter] != -1 && left_on_buff > 0)
 	{
 		ds_read(file_positions[counter], buffer);
-		remaining = length - bytesRead;
-
+		
 		if(remaining >= BLOCK_SIZE) {
-			memcpy(buff, buffer, BLOCK_SIZE);
-			bytesRead += BLOCK_SIZE;
+			to_be_read = BLOCK_SIZE;
+			if(BLOCK_SIZE > left_on_buff)
+			{
+				to_be_read = left_on_buff;
+			}
+			memcpy(buff, buffer + offset_in_bytes, to_be_read);
+			bytesRead += to_be_read;
+			left_on_buff -= to_be_read;
+			remaining -= to_be_read;
 		} else {
-        	memcpy(buff, buffer, remaining);
-        	bytesRead += remaining;
+			to_be_read = remaining;
+			if(remaining > left_on_buff)
+			{
+				to_be_read = left_on_buff;
+			}
+        	memcpy(buff, buffer + offset_in_bytes, to_be_read);
+        	bytesRead += to_be_read;
+			left_on_buff -= to_be_read;
+			remaining -= to_be_read;
     	}
-
 		counter++;
+	}
+	
+	if(bytesRead < length)
+	{
+		memset(buff + bytesRead, '\0', left_on_buff);
 	}
 
 	free(buffer);
@@ -444,5 +462,174 @@ int fat_read( char *name, char *buff, int length, int offset){
 
 //Retorna a quantidade de caracteres escritos
 int fat_write( char *name, const char *buff, int length, int offset){
-	return 0;
+	if(mountState == 0)
+	{
+		return -1;
+	}
+
+	int index = -1;
+	for(int i = 0; i < N_ITEMS; i++)
+	{
+		//verificando se arquivo tem o nome buscado
+		if(dir[i].used == NON_OK || strcmp(name, dir[i].name) != 0)
+		{
+			continue;
+		}
+
+		index = i;
+	}
+
+	if (index == -1) {
+       	return -1;
+    }
+
+	char *buffer = malloc(BLOCK_SIZE); 
+	int bytesWrote = 0;
+	
+	//iniciando variável de posição
+	unsigned int pos = dir[index].first;
+	//Iniciando array que guardará posições da FAT a serem marcadas como livres
+	unsigned int *file_positions;
+	//O máximo de blocos que um arquivo pode ocupar é 17 (a quantidade de blocos para arquivos)
+	file_positions = (unsigned int *) malloc(N_ITEMS-3);
+	search_file_blocks_on_fat(dir[index].first, file_positions, fat);
+
+	int counter = 0;
+	
+	int remaining = length;
+
+	int blocks_of_offset = offset/BLOCK_SIZE;
+	int offset_in_bytes = offset%BLOCK_SIZE;
+
+	int length_ahead_in_block = length/BLOCK_SIZE;
+	int length_ahead_in_bytes = length%BLOCK_SIZE;
+
+	while(file_positions[counter] != -1)
+	{
+		counter++;
+	}
+
+	int blocks_to_allocate = 0;
+
+	if(length_ahead_in_block > 0)
+	{
+		if(length_ahead_in_bytes > 0)
+		{
+			blocks_to_allocate++;
+		}
+	}
+
+	if(length_ahead_in_block > counter)
+	{
+		blocks_to_allocate += length_ahead_in_block - counter;
+	}
+
+	int last_used_block = file_positions[counter-1];
+
+	for(int i = 0; i < blocks_to_allocate; i++)
+	{
+		int free_block_found = 0;
+		for(int j = 3; j < sb.number_blocks; j++)
+		{
+			if(fat[j] != FREE)
+			{
+				continue;
+			}
+
+			free_block_found = 1;
+
+			fat[j] = EOFF;
+			fat[last_used_block] = j;
+			last_used_block = j;
+			file_positions[counter] = j;
+			file_positions[counter+1] = -1;
+			counter++;
+
+			break;
+		}
+
+		if(!free_block_found)
+		{
+			remaining -= ((blocks_to_allocate - i)*BLOCK_SIZE) - length_ahead_in_bytes;
+		}
+	}
+
+	for(int i = 0; i < 10; i++){
+		printf("\n=====%u=====\n", fat[i]);
+	}
+
+	file_positions[counter] = -1;
+
+	int initial_pos = file_positions[blocks_of_offset];
+	counter = blocks_of_offset;
+	int to_be_write = remaining;
+
+	if(remaining >= BLOCK_SIZE) {
+		to_be_write = BLOCK_SIZE - offset_in_bytes;
+		ds_read(initial_pos, buffer);
+		memcpy(buffer + offset_in_bytes, buff, to_be_write);
+		
+		ds_write(initial_pos, buffer);
+
+		bytesWrote += to_be_write;
+		remaining -= to_be_write;
+	} else {
+		to_be_write = remaining;
+
+		ds_read(initial_pos, buffer);
+		memcpy(buffer + offset_in_bytes, buff, to_be_write);
+		
+		ds_write(initial_pos, buffer);
+
+		bytesWrote += to_be_write;
+		remaining -= to_be_write;
+	}
+	counter++;
+
+	while(remaining > 0 && file_positions[counter] != -1)
+	{	
+		if(remaining >= BLOCK_SIZE) {
+			to_be_write = BLOCK_SIZE;
+			
+			ds_write(file_positions[counter], buff);
+
+			bytesWrote += to_be_write;
+			remaining -= to_be_write;
+		} else {
+			to_be_write = remaining;
+	
+			ds_read(file_positions[counter], buffer);
+			memcpy(buffer, buff, to_be_write);
+			memset(buffer + to_be_write, '\0', BLOCK_SIZE - to_be_write);
+			
+			ds_write(file_positions[counter], buffer);
+
+			bytesWrote += to_be_write;
+			remaining -= to_be_write;
+		}
+		counter++;
+	}
+
+	dir[index].length = bytesWrote;
+
+	//Limpando lixo do buffer
+	memset(buffer, 0, BLOCK_SIZE);
+	//Copiando DIR para o buffer
+	memcpy(buffer, dir, sizeof(dir));
+	
+	//Escrevendo DIR no disco 
+	ds_write(1, buffer);
+
+	//Limpando lixo do buffer
+	memset(buffer, 0, BLOCK_SIZE);
+	//Copiando FAT para o buffer
+	memcpy(buffer, fat, BLOCK_SIZE);
+
+	//Escrevendo FAT no disco 
+	ds_write(2, buffer);
+
+	free(buffer);
+	free(file_positions);
+
+	return bytesWrote;
 }
